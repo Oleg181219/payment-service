@@ -15,6 +15,7 @@ import (
 
 type PaymentHandler struct {
 	tonService *services.TONService
+	intent     *services.IntentStore
 	config     *config.Config
 }
 
@@ -23,9 +24,11 @@ func NewPaymentHandler(cfg *config.Config) (*PaymentHandler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TON service: %v", err)
 	}
+	intent := services.NewIntentStore(cfg.AppWallet, 20*time.Minute)
 
 	return &PaymentHandler{
 		tonService: tonService,
+		intent:     intent,
 		config:     cfg,
 	}, nil
 }

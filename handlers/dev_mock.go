@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"time"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"payment-service/models"
@@ -40,6 +41,32 @@ func (h *PaymentHandler) CheckPaymentWait(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, models.APIResponse{Success:false, Message:"Error: "+err.Error()}); return
 	}
 	c.JSON(http.StatusOK, models.APIResponse{Success: ok, Message:"Wait result", Data: ok})
+}
+
+// POST /api/dev/mock-intent-paid { "intentId":"...", "sender":"EQ_TEST", "amountTon":"0.100000000" }
+func (h *PaymentHandler) DevMockIntentPaid(c *gin.Context) {
+	var req struct {
+		IntentId string `json:"intentId" binding:"required"`
+		Sender   string `json:"sender"`
+		AmountTon string `json:"amountTon,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.APIResponse{Success:false, Message:"Invalid: "+err.Error()})
+		return
+	}
+	pi, ok := h.intent.Get(req.IntentId)
+	if !ok {
+		c.JSON(http.StatusGone, models.APIResponse{Success:false, Message:"intent not found or expired"})
+		return
+	}
+	amt := req.AmountTon
+	if strings.TrimSpace(amt) == "" { amt = pi.AmountTon }
+	if strings.TrimSpace(amt) == "" { amt = "0.000000001" } // минимальная
+	if err := h.tonService.DevAddMockEvent(pi.MerchantAddress, req.Sender, amt, pi.Comment); err != nil {
+		c.JSON(http.StatusBadRequest, models.APIResponse{Success:false, Message:err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, models.APIResponse{Success:true, Message:"Intent mocked as paid"})
 }
 
 // GET /api/debug/events/:account

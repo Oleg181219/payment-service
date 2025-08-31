@@ -35,11 +35,14 @@ func main() {
 		api.GET("/transactions/:account", paymentHandler.GetTransactionHistory)
 		api.GET("/balance/:account", paymentHandler.GetBalance)
 		api.GET("/health", paymentHandler.HealthCheck)
+		api.POST("/payment-intent", paymentHandler.CreatePaymentIntent)
+		api.POST("/payment-intent/wait", paymentHandler.WaitPaymentByIntent)
 
 		// DEV
 		api.POST("/dev/mock-event", paymentHandler.DevMockAddEvent)
 		api.POST("/check-payment/wait", paymentHandler.CheckPaymentWait)
 		api.GET("/debug/events/:account", paymentHandler.DebugEvents)
+		api.POST("/dev/mock-intent-paid", paymentHandler.DevMockIntentPaid)
 	}
 	for _, r := range router.Routes() {
 		log.Printf("ROUTE %-6s %s", r.Method, r.Path)

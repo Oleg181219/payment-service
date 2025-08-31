@@ -84,3 +84,21 @@ type CheckPaymentRequest struct {
 	MinAmountTon    string // "3.000000000"
 	Limit           int
 }
+
+type PaymentIntentCreateRequest struct {
+	AmountTon string `json:"amountTon,omitempty"` // опционально, "0.100000000"
+	TtlSec    int    `json:"ttlSec,omitempty"`    // опционально, дефолт 1200 (20 мин)
+}
+
+type PaymentIntentResponse struct {
+	IntentId        string    `json:"intentId"`
+	MerchantAddress string    `json:"merchantAddress"`
+	Comment         string    `json:"comment"`
+	AmountTon       string    `json:"amountTon,omitempty"`
+	ExpiresAt       time.Time `json:"expiresAt"`
+}
+
+type PaymentIntentWaitRequest struct {
+	IntentId string `json:"intentId" binding:"required"`
+	TimeoutSec int  `json:"timeoutSec,omitempty"` // дефолт 60
+}

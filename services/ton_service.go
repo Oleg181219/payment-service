@@ -144,3 +144,21 @@ func (s *TONService) GetWalletBalance(ctx context.Context, accountID string) (st
 	}
 	return nanosIntToTonString(nanos), nil
 }
+
+// DevAddMockEvent — доступно только когда client == *MockTonAPIAdapter
+func (s *TONService) DevAddMockEvent(accountID, sender, amountTon, comment string) error {
+	m, ok := s.client.(*MockTonAPIAdapter)
+	if !ok { return fmt.Errorf("mock mode is not enabled") }
+	d, err := decimal.NewFromString(amountTon)
+	if err != nil { return fmt.Errorf("bad amountTon: %w", err) }
+	nanos := d.Mul(decimal.NewFromInt(1_000_000_000)).Truncate(0).String()
+	if sender == "" { sender = "EQ_MOCK_SENDER" }
+	m.AddEvent(accountID, sender, nanos, comment)
+	return nil
+}
+
+// DebugLastEvents — пригодится для /api/debug/events
+func (s *TONService) DebugLastEvents(ctx context.Context, accountID string, limit int) (Events, error) {
+	if limit <= 0 || limit > 200 { limit = 10 }
+	return s.client.GetAccountEvents(ctx, accountID, limit)
+}

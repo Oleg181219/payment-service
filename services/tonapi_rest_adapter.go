@@ -13,7 +13,7 @@ import (
 
 	"github.com/xssnick/tonutils-go/address"
 
-	"payment-service/config"
+
 )
 
 // адрес из tonutils-go может уметь отдавать raw ("0:<hex>")
@@ -47,11 +47,7 @@ func readBody(resp *http.Response) string {
 	return string(b)
 }
 
-// NewTONService — фабрика сервиса: REST-адаптер к TonAPI (без SDK).
-func NewTONService(cfg *config.Config) (*TONService, error) {
-	client := NewRestTonAPIAdapter(cfg.TonApiURL, cfg.ApiKey)
-	return &TONService{client: client}, nil
-}
+
 
 // ---------------- REST TonAPI adapter ----------------
 

@@ -35,6 +35,14 @@ func main() {
 		api.GET("/transactions/:account", paymentHandler.GetTransactionHistory)
 		api.GET("/balance/:account", paymentHandler.GetBalance)
 		api.GET("/health", paymentHandler.HealthCheck)
+
+		// DEV
+		api.POST("/dev/mock-event", paymentHandler.DevMockAddEvent)
+		api.POST("/check-payment/wait", paymentHandler.CheckPaymentWait)
+		api.GET("/debug/events/:account", paymentHandler.DebugEvents)
+	}
+	for _, r := range router.Routes() {
+		log.Printf("ROUTE %-6s %s", r.Method, r.Path)
 	}
 
 	// Запуск сервера

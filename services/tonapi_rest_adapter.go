@@ -1,16 +1,51 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/xssnick/tonutils-go/address"
+
 	"payment-service/config"
 )
+
+// адрес из tonutils-go может уметь отдавать raw ("0:<hex>")
+// через метод ToRaw(). Опишем минимальный интерфейс для безопасной проверки.
+type rawStringer interface {
+	ToRaw() string
+}
+
+
+func normalizeTONAddr(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return id
+	}
+	a, err := address.ParseAddr(id)
+	if err != nil {
+		return id // TonAPI вернёт 400, а мы увидим полную ошибку в логах
+	}
+	// Если у типа есть ToRaw() — отдаём raw "0:<hex>" (надежно для TonAPI)
+	if r, ok := any(a).(rawStringer); ok {
+		return r.ToRaw()
+	}
+	// Фоллбек: friendly строка (может остаться UQ/EQ как в исходном)
+	return a.String()
+}
+
+// маленький хелпер для тела ошибки:
+func readBody(resp *http.Response) string {
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body = io.NopCloser(bytes.NewReader(b))
+	return string(b)
+}
 
 // NewTONService — фабрика сервиса: REST-адаптер к TonAPI (без SDK).
 func NewTONService(cfg *config.Config) (*TONService, error) {
@@ -142,18 +177,17 @@ func (a *RestTonAPIAdapter) GetAccountEvents(ctx context.Context, accountID stri
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	u := fmt.Sprintf("%s/v2/accounts/%s/events?limit=%d", a.base, url.PathEscape(accountID), limit)
+	acc := normalizeTONAddr(accountID)
+	u := fmt.Sprintf("%s/v2/accounts/%s/events?limit=%d", a.base, url.PathEscape(acc), limit)
 
 	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
 	a.auth(req)
 
 	resp, err := a.http.Do(req)
-	if err != nil {
-		return Events{}, err
-	}
+	if err != nil { return Events{}, err }
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return Events{}, fmt.Errorf("tonapi events status %d", resp.StatusCode)
+		return Events{}, fmt.Errorf("tonapi events status %d url=%s body=%s", resp.StatusCode, u, readBody(resp))
 	}
 
 	var er tonapiEventsResp
@@ -234,7 +268,8 @@ type tonapiAccountResp struct {
 }
 
 func (a *RestTonAPIAdapter) GetAccount(ctx context.Context, accountID string) (int64, string, error) {
-	u := fmt.Sprintf("%s/v2/accounts/%s", a.base, url.PathEscape(accountID))
+	acc := normalizeTONAddr(accountID)
+	u := fmt.Sprintf("%s/v2/accounts/%s", a.base, url.PathEscape(acc))
 	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
 	a.auth(req)
 
@@ -244,7 +279,7 @@ func (a *RestTonAPIAdapter) GetAccount(ctx context.Context, accountID string) (i
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return 0, "", fmt.Errorf("tonapi account status %d", resp.StatusCode)
+		return 0, "", fmt.Errorf("tonapi account status %d url=%s body=%s", resp.StatusCode, u, readBody(resp))
 	}
 	var ar tonapiAccountResp
 	if err := json.NewDecoder(resp.Body).Decode(&ar); err != nil {

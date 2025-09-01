@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+
 	"payment-service/config"
 	"payment-service/models"
 	"payment-service/services"
@@ -16,19 +18,29 @@ import (
 type PaymentHandler struct {
 	tonService *services.TONService
 	intent     *services.IntentStore
+	Events     *services.EventBus // <-- фикс: правильный тип EventBus
 	config     *config.Config
 }
 
-func NewPaymentHandler(cfg *config.Config) (*PaymentHandler, error) {
+func (h *PaymentHandler) TonService() *services.TONService     { return h.tonService }
+func (h *PaymentHandler) IntentStore() *services.IntentStore   { return h.intent }
+
+// Принимаем bus из main.go
+func NewPaymentHandler(cfg *config.Config, bus *services.EventBus) (*PaymentHandler, error) {
 	tonService, err := services.NewTONService(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TON service: %v", err)
 	}
+	if strings.TrimSpace(cfg.AppWallet) == "" {
+		return nil, fmt.Errorf("merchant (AppWallet) is not configured")
+	}
+
 	intent := services.NewIntentStore(cfg.AppWallet, 20*time.Minute)
 
 	return &PaymentHandler{
 		tonService: tonService,
 		intent:     intent,
+		Events:     bus, // <-- фикс: пробрасываем EventBus из main
 		config:     cfg,
 	}, nil
 }
@@ -171,7 +183,6 @@ func (h *PaymentHandler) HealthCheck(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Проверяем соединение с TON API
 	_, err := h.tonService.GetWalletBalance(ctx, h.config.AppWallet)
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, models.Response{

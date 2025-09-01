@@ -60,6 +60,8 @@ func (s *IntentStore) Create(amountTon string, ttl time.Duration) PaymentIntent 
 	return pi
 }
 
+func (s *IntentStore) Merchant() string { return s.merchant }
+
 func (s *IntentStore) Get(id string) (PaymentIntent, bool) {
 	s.mu.RLock()
 	pi, ok := s.intents[id]

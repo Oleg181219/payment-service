@@ -11,6 +11,9 @@ import (
 )
 
 func (h *PaymentHandler) CreatePaymentIntent(c *gin.Context) {
+	if h.intent == nil || strings.TrimSpace(h.intent.Merchant()) == "" {
+		c.JSON(http.StatusInternalServerError, models.APIResponse{Success:false, Message:"merchant address is not configured"}); return
+	}
 	var req models.PaymentIntentCreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, models.APIResponse{Success:false, Message:"Invalid: "+err.Error()})

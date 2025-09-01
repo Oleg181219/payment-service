@@ -232,6 +232,67 @@ func (s *TONService) DevAddMockEvent(accountID, sender, amountTon, comment strin
 	return nil
 }
 
+// Результат точного совпадения платежа
+type PaymentMatch struct {
+	Ok      bool
+	TxHash  string // event_id из TonAPI
+	Amount  string // TON, scale=9
+	Comment string // нормализованный (TrimSpace) комментарий
+}
+
+// FindPayment ищет событие TonTransfer на адрес мерчанта с нужным комментарием и суммой >= MinAmountTon.
+// Если не найдено — Ok=false и error=nil.
+func (s *TONService) FindPayment(ctx context.Context, req models.CheckPaymentRequest) (PaymentMatch, error) {
+	limit := req.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	minTon, err := decimal.NewFromString(req.MinAmountTon)
+	if err != nil {
+		return PaymentMatch{}, fmt.Errorf("bad MinAmountTon: %w", err)
+	}
+
+	evs, err := s.client.GetAccountEvents(ctx, req.MerchantAddress, limit)
+	if err != nil {
+		return PaymentMatch{}, fmt.Errorf("GetAccountEvents: %w", err)
+	}
+
+	wantComment := normalizeComment(req.Comment)
+	for _, ev := range evs.Events {
+		for _, a := range ev.Actions {
+			// Только переводы TON и только входящие на адрес мерчанта
+			if !equalsFold(a.Type, "TonTransfer") {
+				continue
+			}
+			if !equalsFold(a.Recipient, req.MerchantAddress) {
+				continue
+			}
+
+			gotComment := ""
+			if a.Payload != nil && equalsFold(a.Payload.Type, "comment") {
+				gotComment = normalizeComment(a.Payload.Text)
+			}
+			if gotComment != wantComment {
+				continue
+			}
+
+			ton, err := nanosStrToTon(a.Amount) // "3000000000" -> 3.000000000
+			if err != nil {
+				continue
+			}
+			if ton.Cmp(minTon) >= 0 {
+				return PaymentMatch{
+					Ok:      true,
+					TxHash:  ev.EventID,
+					Amount:  ton.StringFixed(9),
+					Comment: gotComment,
+				}, nil
+			}
+		}
+	}
+	return PaymentMatch{Ok: false}, nil
+}
+
 // DebugLastEvents — вернуть нормализованные события (для /api/debug/events).
 func (s *TONService) DebugLastEvents(ctx context.Context, accountID string, limit int) (Events, error) {
 	if limit <= 0 || limit > 200 {

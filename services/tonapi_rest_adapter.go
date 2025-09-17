@@ -12,16 +12,15 @@ import (
 	"time"
 
 	"github.com/xssnick/tonutils-go/address"
-
-
 )
 
-// адрес из tonutils-go может уметь отдавать raw ("0:<hex>")
-// через метод ToRaw(). Опишем минимальный интерфейс для безопасной проверки.
-type rawStringer interface {
-	ToRaw() string
-}
+// ------------ helpers ------------
 
+// адрес из tonutils-go может уметь отдавать raw ("0:<hex>")
+// через метод StringRaw(). Опишем минимальный интерфейс для безопасной проверки.
+type rawStringer interface {
+	StringRaw() string
+}
 
 func normalizeTONAddr(id string) string {
 	id = strings.TrimSpace(id)
@@ -30,14 +29,11 @@ func normalizeTONAddr(id string) string {
 	}
 	a, err := address.ParseAddr(id)
 	if err != nil {
-		return id // TonAPI вернёт 400, а мы увидим полную ошибку в логах
+		// Если не смогли распарсить — возвращаем то, что дали, TonAPI ответит 400
+		return id
 	}
-	// Если у типа есть ToRaw() — отдаём raw "0:<hex>" (надежно для TonAPI)
-	if r, ok := any(a).(rawStringer); ok {
-		return r.ToRaw()
-	}
-	// Фоллбек: friendly строка (может остаться UQ/EQ как в исходном)
-	return a.String()
+	// Возвращаем всегда RAW-адрес: "0:<hex>"
+	return a.StringRaw()
 }
 
 // маленький хелпер для тела ошибки:
@@ -46,8 +42,6 @@ func readBody(resp *http.Response) string {
 	resp.Body = io.NopCloser(bytes.NewReader(b))
 	return string(b)
 }
-
-
 
 // ---------------- REST TonAPI adapter ----------------
 
@@ -92,24 +86,21 @@ func parseAddr(raw json.RawMessage) string {
 	return ""
 }
 
+// ------------ Event responses ------------
+
 // Сырой ответ TonAPI для /v2/accounts/{addr}/events
-// Мы читаем только то, что нужно для TonTransfer (+комментарий).
 type tonapiEventsResp struct {
 	Events []struct {
-		EventID   string `json:"event_id"`
-		Timestamp int64  `json:"timestamp"`
+		EventID   string            `json:"event_id"`
+		Timestamp int64             `json:"timestamp"`
 		Actions   []json.RawMessage `json:"actions"`
 	} `json:"events"`
 }
 
-// В TonAPI action — "discriminated union": есть поле "type"
-// и под-структура по типу (например, "TonTransfer": {...}).
-// Для надёжности пробуем вытащить поля из нескольких возможных мест:
-// - верхний уровень action (если провайдер кладёт плоско);
-// - вложенный объект с деталями (ton_transfer/TonTransfer/transfer/...).
+// В TonAPI action — "discriminated union".
 type actionHeader struct {
 	Type string `json:"type"`
-	// возможные "плоские" поля (если повезёт)
+	// возможные "плоские" поля
 	Amount    string          `json:"amount"`
 	Recipient json.RawMessage `json:"recipient"`
 	Sender    json.RawMessage `json:"sender"`
@@ -117,33 +108,27 @@ type actionHeader struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"payload"`
-	// всё остальное — оставим для ручного поиска вложенных объектов
 }
 
+// ⚡ Исправленный nestedTransfer
 type nestedTransfer struct {
-	// разные возможные поля под разные версии схемы
-	Amount      string          `json:"amount"`
-	Value       string          `json:"value"`
+	Amount      any             `json:"amount"`       // ⚡ может быть string или number
+	Value       any             `json:"value"`        // иногда TonAPI использует value
 	Recipient   json.RawMessage `json:"recipient"`
 	Destination json.RawMessage `json:"destination"`
 	Sender      json.RawMessage `json:"sender"`
 	Source      json.RawMessage `json:"source"`
-	Comment     *struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"comment"`
-	Payload *struct {
+	Comment     string          `json:"comment"`      // ⚡ новый: TonAPI кладёт коммент строкой
+	Payload     *struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"payload"`
 }
 
-// ищем первый вложенный объект, похожий на TonTransfer
+// ищем вложенный объект, похожий на TonTransfer
 func findNestedTransfer(m map[string]json.RawMessage) *nestedTransfer {
-	// типичные ключи, под которыми лежат детали тон-перевода
-	candidates := []string{
-		"TonTransfer", "ton_transfer", "transfer", "tonTransfer",
-	}
+	// типичные ключи для деталей перевода
+	candidates := []string{"TonTransfer", "ton_transfer", "transfer", "tonTransfer"}
 	var obj nestedTransfer
 	for _, k := range candidates {
 		if raw, ok := m[k]; ok && len(raw) > 0 {
@@ -152,15 +137,14 @@ func findNestedTransfer(m map[string]json.RawMessage) *nestedTransfer {
 			}
 		}
 	}
-	// если не нашли — попробуем перебрать все вложенные объекты и взять первый,
-	// в котором есть amount/value (на всякий случай)
+	// fallback
 	for k, raw := range m {
 		if k == "type" || k == "amount" || k == "recipient" || k == "sender" || k == "payload" {
 			continue
 		}
 		var tmp nestedTransfer
 		if json.Unmarshal(raw, &tmp) == nil {
-			if tmp.Amount != "" || tmp.Value != "" {
+			if tmp.Amount != nil || tmp.Value != nil {
 				return &tmp
 			}
 		}
@@ -168,7 +152,8 @@ func findNestedTransfer(m map[string]json.RawMessage) *nestedTransfer {
 	return nil
 }
 
-// GetAccountEvents — подтягиваем и нормализуем события из TonAPI под наш Events.
+// ------------ Public methods ------------
+
 func (a *RestTonAPIAdapter) GetAccountEvents(ctx context.Context, accountID string, limit int) (Events, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
@@ -180,7 +165,9 @@ func (a *RestTonAPIAdapter) GetAccountEvents(ctx context.Context, accountID stri
 	a.auth(req)
 
 	resp, err := a.http.Do(req)
-	if err != nil { return Events{}, err }
+	if err != nil {
+		return Events{}, err
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		return Events{}, fmt.Errorf("tonapi events status %d url=%s body=%s", resp.StatusCode, u, readBody(resp))
@@ -202,7 +189,6 @@ func (a *RestTonAPIAdapter) GetAccountEvents(ctx context.Context, accountID stri
 			_ = json.Unmarshal(rawAct, &head)
 			actType := head.Type
 
-			// по умолчанию попробуем взять "плоские" поля
 			amount := head.Amount
 			recipient := parseAddr(head.Recipient)
 			sender := parseAddr(head.Sender)
@@ -211,35 +197,52 @@ func (a *RestTonAPIAdapter) GetAccountEvents(ctx context.Context, accountID stri
 				payload = &EventPayload{Type: head.Payload.Type, Text: head.Payload.Text}
 			}
 
-			// если плоских полей нет — попробуем найти вложенный объект TonTransfer
-			if amount == "" || recipient == "" || sender == "" {
+			// fallback через nestedTransfer
+			if amount == "" || recipient == "" || sender == "" || payload == nil {
 				var asMap map[string]json.RawMessage
 				_ = json.Unmarshal(rawAct, &asMap)
 				if tr := findNestedTransfer(asMap); tr != nil {
-					if amount == "" {
-						if tr.Amount != "" {
-							amount = tr.Amount
-						} else if tr.Value != "" {
-							amount = tr.Value
+					// amount
+					if amount == "" && tr.Amount != nil {
+						switch v := tr.Amount.(type) {
+						case string:
+							amount = v
+						case float64:
+							amount = fmt.Sprintf("%.0f", v)
+						case int:
+							amount = fmt.Sprintf("%d", v)
 						}
 					}
+					if amount == "" && tr.Value != nil {
+						switch v := tr.Value.(type) {
+						case string:
+							amount = v
+						case float64:
+							amount = fmt.Sprintf("%.0f", v)
+						case int:
+							amount = fmt.Sprintf("%d", v)
+						}
+					}
+					// recipient
 					if recipient == "" {
 						recipient = parseAddr(tr.Recipient)
 						if recipient == "" {
 							recipient = parseAddr(tr.Destination)
 						}
 					}
+					// sender
 					if sender == "" {
 						sender = parseAddr(tr.Sender)
 						if sender == "" {
 							sender = parseAddr(tr.Source)
 						}
 					}
+					// payload / comment
 					if payload == nil {
 						if tr.Payload != nil {
 							payload = &EventPayload{Type: tr.Payload.Type, Text: tr.Payload.Text}
-						} else if tr.Comment != nil {
-							payload = &EventPayload{Type: tr.Comment.Type, Text: tr.Comment.Text}
+						} else if tr.Comment != "" {
+							payload = &EventPayload{Type: "comment", Text: tr.Comment}
 						}
 					}
 				}
@@ -257,6 +260,8 @@ func (a *RestTonAPIAdapter) GetAccountEvents(ctx context.Context, accountID stri
 	}
 	return out, nil
 }
+
+// ----------- Account info -------------
 
 type tonapiAccountResp struct {
 	Balance int64  `json:"balance"`

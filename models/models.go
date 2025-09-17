@@ -2,8 +2,13 @@ package models
 
 import "time"
 
+// Универсальный API респонс
 type Response = APIResponse
 type PaymentValidationRequest = ValidateTxRequest
+
+// ----------------------------------------------------------
+// Транзакции / платежи
+// ----------------------------------------------------------
 
 type TransactionInfo struct {
 	Hash      string    `json:"hash"`
@@ -12,11 +17,11 @@ type TransactionInfo struct {
 	Amount    string    `json:"amount"`
 	Status    string    `json:"status"`
 	Timestamp time.Time `json:"timestamp"`
-	Comment   string    `json:"comment,omitempty"`
+	Comment   string    `json:"comment,omitempty"` // свободный текст-поле (если был в транзакции)
 	Currency  string    `json:"currency,omitempty"`
 }
 
-// Если где-то нужна проверка по txHash (не для нашего сервиса)
+// Вспомогательная структура (не для нашего сервиса напрямую)
 type PaymentCheckByTxRequest struct {
 	WalletAddress string `json:"wallet_address" binding:"required"`
 	TxHash        string `json:"tx_hash" binding:"required"`
@@ -28,7 +33,7 @@ type PaymentCheckByTxRequest struct {
 type TransferRequest struct {
 	TargetWallet string `json:"target_wallet" binding:"required"`
 	Amount       string `json:"amount" binding:"required"` // "X.YYYYYYYYY"
-	Comment      string `json:"comment,omitempty"`
+	Comment      string `json:"comment,omitempty"`         // здесь именно текстовый, NOT tonComment
 }
 
 type ValidateTxRequest struct {
@@ -36,11 +41,19 @@ type ValidateTxRequest struct {
 	TxHash        string `json:"tx_hash" binding:"required"`
 }
 
+// ----------------------------------------------------------
+// Универсальный ответ API
+// ----------------------------------------------------------
+
 type APIResponse struct {
 	Success bool        `json:"success"`
 	Message string      `json:"message"`
 	Data    interface{} `json:"data,omitempty"`
 }
+
+// ----------------------------------------------------------
+// История кошелька
+// ----------------------------------------------------------
 
 type WalletTxInfo struct {
 	Hash      string    `json:"hash"`
@@ -52,6 +65,10 @@ type WalletTxInfo struct {
 	Comment   string    `json:"comment,omitempty"`
 	Currency  string    `json:"currency,omitempty"`
 }
+
+// ----------------------------------------------------------
+// Информация об аккаунте TON
+// ----------------------------------------------------------
 
 type AccountInfo struct {
 	Address      string          `json:"address"`
@@ -77,28 +94,50 @@ type NFTItem struct {
 	Metadata    interface{} `json:"metadata,omitempty"`
 }
 
+// ----------------------------------------------------------
+// Работа с Intent’ами
+// ----------------------------------------------------------
+
 // Это то, что использует TONService для поиска платежа:
 type CheckPaymentRequest struct {
 	MerchantAddress string
-	Comment         string
+	TonComment      string // ищем по комментарию в TON, напр. "ORD-39A700"
 	MinAmountTon    string // "3.000000000"
 	Limit           int
 }
 
+// Запрос на создание PaymentIntent
 type PaymentIntentCreateRequest struct {
-	AmountTon string `json:"amountTon,omitempty"` // опционально, "0.100000000"
-	TtlSec    int    `json:"ttlSec,omitempty"`    // опционально, дефолт 1200 (20 мин)
+	OrderIdUUID string `json:"orderId"`              // UUID заказа (строкой)
+	AmountTon   string `json:"amountTon,omitempty"`  // опционально, "0.100000000"
+	TtlSec      int    `json:"ttlSec,omitempty"`     // опционально, дефолт 1200 (20 мин)
 }
 
+// Ответ / событие о создании Intent
 type PaymentIntentResponse struct {
 	IntentId        string    `json:"intentId"`
+	OrderIdUUID     string    `json:"orderId"`       // UUID заказа
 	MerchantAddress string    `json:"merchantAddress"`
-	Comment         string    `json:"comment"`
+	TonComment      string    `json:"tonComment"`    // строка вида "ORD-xxxxxx"
 	AmountTon       string    `json:"amountTon,omitempty"`
 	ExpiresAt       time.Time `json:"expiresAt"`
 }
 
+// Запрос на ожидание платежа по Intent
 type PaymentIntentWaitRequest struct {
-	IntentId string `json:"intentId" binding:"required"`
-	TimeoutSec int  `json:"timeoutSec,omitempty"` // дефолт 60
+	IntentId   string `json:"intentId" binding:"required"`
+	TimeoutSec int    `json:"timeoutSec,omitempty"` // дефолт 60
+}
+
+// ----------------------------------------------------------
+// Подтверждение платежа (событие "pay.payment.confirmed")
+// ----------------------------------------------------------
+
+type PaymentConfirmedPayload struct {
+	OrderIdUUID string    `json:"orderId"`   // UUID заказа
+	IntentId    string    `json:"intentId"`
+	TxHash      string    `json:"txHash"`
+	AmountTon   string    `json:"amountTon"`
+	TonComment  string    `json:"tonComment"` // тот самый "ORD-xxxxxx"
+	ConfirmedAt time.Time `json:"confirmedAt"`
 }

@@ -13,31 +13,39 @@ import (
 	"github.com/google/uuid"
 )
 
+// ------------ Payload structs -------------
+
+// Запрос на создание Intent
 type IntentCreatePayload struct {
-	OrderId    string `json:"orderId"`
-	AmountTon  string `json:"amountTon"`
-	TtlSec     int    `json:"ttlSec"`
-	TelegramId *int64 `json:"telegramId,omitempty"`
-	BloggerId  *int64 `json:"bloggerId,omitempty"`
+	OrderIdUUID string `json:"orderId"`             // UUID заказа
+	AmountTon   string `json:"amountTon"`
+	TtlSec      int    `json:"ttlSec"`
+	TelegramId  *int64 `json:"telegramId,omitempty"`
+	BloggerId   *int64 `json:"bloggerId,omitempty"`
 }
 
+// Событие "intent создан"
 type IntentCreatedPayload struct {
-	OrderId         string    `json:"orderId"`
+	OrderIdUUID     string    `json:"orderId"`        // UUID заказа
 	IntentId        string    `json:"intentId"`
 	MerchantAddress string    `json:"merchantAddress"`
-	Comment         string    `json:"comment"`
+	TonComment      string    `json:"tonComment"`     // "ORD-xxxxxx"
 	AmountTon       string    `json:"amountTon"`
 	ExpiresAt       time.Time `json:"expiresAt"`
 }
 
+// Событие "платёж подтверждён"
 type PaymentConfirmedPayload struct {
-	OrderId     string    `json:"orderId"`
+	OrderIdUUID string    `json:"orderId"`   // UUID заказа
 	IntentId    string    `json:"intentId"`
 	TxHash      string    `json:"txHash"`
 	AmountTon   string    `json:"amountTon"`
-	Comment     string    `json:"comment"`
+	TonComment  string    `json:"tonComment"` // тот самый "ORD-xxxxxx"
+	FromAddress string    `json:"fromAddress"`
 	ConfirmedAt time.Time `json:"confirmedAt"`
 }
+
+// ------------ Processor -------------
 
 type IntentProcessor struct {
 	Bus         *EventBus
@@ -57,13 +65,10 @@ func NewIntentProcessor(bus *EventBus, ton *TONService, merchant string, ttl tim
 	}
 	return &IntentProcessor{
 		Bus: bus, Ton: ton, Merchant: strings.TrimSpace(merchant),
-		DefaultTTL: ttl, MaxWatchers: maxWatchers, watchSem: make(chan struct{}, maxWatchers),
+		DefaultTTL: ttl,
+		MaxWatchers: maxWatchers,
+		watchSem: make(chan struct{}, maxWatchers),
 	}
-}
-
-func genORD() string {
-	s := strings.ToUpper(strings.ReplaceAll(uuid.New().String(), "-", ""))
-	return "ORD-" + s[:6]
 }
 
 func (p *IntentProcessor) Start(ctx context.Context) {
@@ -105,93 +110,105 @@ func (p *IntentProcessor) processCreate(ctx context.Context, r EventRow) error {
 		return fmt.Errorf("merchant address not configured")
 	}
 
+	// OrderId должен быть строго UUID
+	_, err := uuid.Parse(in.OrderIdUUID)
+	if err != nil {
+		return fmt.Errorf("invalid orderId '%s': must be UUID", in.OrderIdUUID)
+	}
+
 	intentId := uuid.New().String()
-	comment := genORD()
+	tonComment := CommentFromOrderId(in.OrderIdUUID)
 
 	ttl := p.DefaultTTL
 	if in.TtlSec > 0 {
 		ttl = time.Duration(in.TtlSec) * time.Second
 	}
 
-	// sanitize amount
 	amt := strings.TrimSpace(in.AmountTon)
 	if amt == "" {
-		amt = "0.000000000" // любой платёж с этим comment
+		amt = "0.000000000"
 	}
 	expires := time.Now().UTC().Add(ttl)
 
 	created := IntentCreatedPayload{
-		OrderId:         in.OrderId,
+		OrderIdUUID:     in.OrderIdUUID,
 		IntentId:        intentId,
 		MerchantAddress: p.Merchant,
-		Comment:         comment,
+		TonComment:      tonComment,
 		AmountTon:       amt,
 		ExpiresAt:       expires,
 	}
-	key := in.OrderId
+	key := in.OrderIdUUID
 	if err := p.Bus.Publish(ctx, "pay.intent.created", created, &key); err != nil {
 		return err
 	}
-	log.Printf("intent.created orderId=%s intentId=%s comment=%s amount=%s expires=%s",
-		in.OrderId, intentId, comment, amt, expires.Format(time.RFC3339))
+	log.Printf("intent.created orderId=%s intentId=%s tonComment=%s amount=%s expires=%s",
+		in.OrderIdUUID, intentId, tonComment, amt, expires.Format(time.RFC3339))
 
-	// watcher: ждём платёж по этому комменту
-	p.spawnWatcher(ctx, in.OrderId, intentId, comment, amt, ttl)
+	// watcher
+	p.spawnWatcher(ctx, in.OrderIdUUID, intentId, tonComment, amt, ttl)
 	return nil
 }
 
-func (p *IntentProcessor) spawnWatcher(parent context.Context, orderId, intentId, comment, amountTon string, ttl time.Duration) {
+func (p *IntentProcessor) spawnWatcher(parent context.Context, orderIdUUID, intentId, tonComment, amountTon string, ttl time.Duration) {
 	select {
 	case p.watchSem <- struct{}{}:
 	default:
-		log.Printf("watcher backlog full, skip orderId=%s", orderId)
+		log.Printf("watcher backlog full, skip orderId=%s", orderIdUUID)
 		return
 	}
+
 	go func() {
 		defer func() { <-p.watchSem }()
-		// уважим отмену приложения
+
 		wctx, cancel := context.WithTimeout(parent, ttl)
 		defer cancel()
 
 		req := models.CheckPaymentRequest{
 			MerchantAddress: p.Merchant,
-			Comment:         comment,
+			TonComment:      tonComment,
 			MinAmountTon:    amountTon,
 			Limit:           100,
 		}
 
 		ok, err := p.Ton.WaitPayment(wctx, req, ttl, 3*time.Second)
 		if err != nil {
-			log.Printf("waitPayment err orderId=%s intentId=%s: %v", orderId, intentId, err)
+			log.Printf("waitPayment err orderId=%s intentId=%s: %v", orderIdUUID, intentId, err)
+			return
 		}
 		if !ok {
 			return
 		}
 
-		// Находим точный матч (txHash/amount/comment)
 		match, err := p.Ton.FindPayment(wctx, req)
 		if err != nil {
-			log.Printf("findPayment err orderId=%s intentId=%s: %v", orderId, intentId, err)
+			log.Printf("findPayment err orderId=%s intentId=%s: %v", orderIdUUID, intentId, err)
 			return
 		}
 		if !match.Ok {
+			log.Printf("⚠️ Платёж не найден по комментарию %s и сумме %s", req.TonComment, req.MinAmountTon)
 			return
 		}
 
+		parsedOrderID := orderIdUUID
+
 		confirmed := PaymentConfirmedPayload{
-			OrderId:     orderId,
+			OrderIdUUID: parsedOrderID,
 			IntentId:    intentId,
 			TxHash:      match.TxHash,
 			AmountTon:   match.Amount,
-			Comment:     match.Comment,
+			TonComment:  match.TonComment,
+			FromAddress: match.FromAddress,
 			ConfirmedAt: time.Now().UTC(),
 		}
-		// event_key = txHash (идемпотентность)
-		key := match.TxHash
+
+		key := parsedOrderID
+		p.Bus.Publish(parent, "pay.payment.confirmed", confirmed, &key)
 		if err := p.Bus.Publish(parent, "pay.payment.confirmed", confirmed, &key); err != nil {
-			log.Printf("publish confirmed err orderId=%s intentId=%s: %v", orderId, intentId, err)
+			log.Printf("publish confirmed err orderId=%s intentId=%s: %v", orderIdUUID, intentId, err)
 			return
 		}
-		log.Printf("payment.confirmed orderId=%s intentId=%s tx=%s amount=%s", orderId, intentId, match.TxHash, match.Amount)
+		log.Printf("payment.confirmed OK orderId=%s intentId=%s tx=%s amount=%s",
+			orderIdUUID, intentId, match.TxHash, match.Amount)
 	}()
 }

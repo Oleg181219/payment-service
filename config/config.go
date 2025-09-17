@@ -1,15 +1,17 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-
+	"github.com/xssnick/tonutils-go/address"
 	"github.com/joho/godotenv"
 )
 
 type Config struct {
+
 	ServerPort       string
 	TonApiURL        string
 	ApiKey           string
@@ -25,7 +27,7 @@ func LoadConfig() *Config {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		ServerPort:       firstNonEmpty(os.Getenv("SERVER_PORT"), os.Getenv("PORT"), "8080"),
+		ServerPort:       firstNonEmpty(os.Getenv("SERVER_PORT"), os.Getenv("PORT"), "8082"),
 		TonApiURL:        firstNonEmpty(os.Getenv("TONAPI_BASE"), os.Getenv("TON_API_URL"), os.Getenv("TONAPI_URL"), "https://tonapi.io"),
 		ApiKey:           firstNonEmpty(os.Getenv("API_KEY"), os.Getenv("TONAPI_TOKEN"), ""),
 		RequestTimeout:   saneDuration(getEnvAsDuration("REQUEST_TIMEOUT", 30*time.Second), 1*time.Second),
@@ -37,7 +39,7 @@ func LoadConfig() *Config {
 
 	// Жёсткий дефолт для локальной БД, если переменная пустая
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
-		cfg.DatabaseURL = "jdbc:postgresql://localhost:5008/woolf_db?sslmode=disable"
+		log.Fatal("DATABASE_URL is required in production")
 	}
 	// Нормализуем для pgx (режем jdbc:, дописываем sslmode=disable при отсутствии)
 	cfg.DatabaseURL = normalizeDSN(cfg.DatabaseURL)
@@ -47,7 +49,30 @@ func LoadConfig() *Config {
 		cfg.AppWallet = "UQDoj1UzJasYurg5oLsfA69pmVG7ATWTxyxawgfGFvLffbX8"
 	}
 
+	if normalized := normalizeTonAddress(cfg.AppWallet); normalized != "" {
+		cfg.AppWallet = normalized
+		log.Printf("✅ Merchant address normalized to: %s", cfg.AppWallet)
+	} else {
+		log.Fatal("❌ Invalid or unparseable merchant address: ", cfg.AppWallet)
+	}
+
+
 	return cfg
+}
+
+// normalizeTonAddress приводит любой TON-адрес (0:, UQ, EQ) к canonical EQ-формату.
+// Возвращает пустую строку в случае ошибки.
+func normalizeTonAddress(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	addr, err := address.ParseAddr(raw)
+	if err != nil {
+		log.Printf("❌ Ошибка парсинга адреса '%s': %v", raw, err)
+		return ""
+	}
+	// String() возвращает адрес в формате EQ...
+	return addr.String()
 }
 
 // ----------------- helpers -----------------
